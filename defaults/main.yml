@@ -1,0 +1,86 @@
+---
+# defaults for emacs-build
+#
+# Build GNU Emacs inside a Docker container whose base image matches the
+# host distribution, export the finished install tree straight onto the
+# host, and clean the daemon up again.  The result runs natively (no
+# container, no sudo, no apt on the host).
+#
+# The configure prefix is the *host* path.  Emacs bakes the prefix into
+# the binary (lisp dir, native-lisp dir, etc), so the tree must land on
+# the host at the same path it was configured for inside the container.
+
+emacs_version: "30.2"
+emacs_tarball_url: "https://ftp.gnu.org/gnu/emacs/emacs-{{ emacs_version }}.tar.xz"
+
+# Base image.  Must match the host glibc; deriving it from the facts does
+# that for Ubuntu hosts.  Override for other distributions.
+emacs_base_image: "ubuntu:{{ ansible_distribution_version }}"
+
+emacs_prefix: "{{ ansible_env.HOME }}/local/emacs-{{ emacs_version }}"
+emacs_bin_dir: "{{ ansible_env.HOME }}/local/bin"
+emacs_build_dir: "{{ ansible_env.HOME }}/local/build/emacs-build-{{ emacs_version }}"
+
+# Where sources and object files go (a few GB while building).  Lives
+# under emacs_build_dir by default, i.e. on the same disk as $HOME, and
+# is bind-mounted into the build container, so Docker's own disk only
+# carries the toolchain image.  Point it at node-local scratch or
+# /dev/shm/$USER for a faster compile if you have the space.
+emacs_work_dir: "{{ emacs_build_dir }}/work"
+
+# The toolchain image is built on its own buildx builder (docker-container
+# driver) so its cache can be dropped as a unit with `docker buildx rm`
+# without touching anything other users of the daemon may have cached.
+emacs_builder: "emacs-build-{{ emacs_version }}"
+emacs_image: "emacs-build-toolchain:{{ emacs_version }}"
+
+emacs_jobs: "{{ ansible_processor_vcpus }}"
+
+# Jammy's libgccjit0 is built from gcc-12, so compile with gcc-12 too.
+# The host must have the matching /usr/lib/gcc/x86_64-linux-gnu/<N>
+# directory (crt*.o, libgcc.a, collect2) for runtime native compilation.
+emacs_gcc_version: 12
+
+# Emacs 30 wants a newer tree-sitter than Jammy ships (0.20), so build it.
+tree_sitter_version: "0.25.10"
+
+emacs_configure_args:
+  - --with-native-compilation=aot
+  - --with-tree-sitter
+  - --with-x-toolkit=gtk3
+  - --with-cairo
+  - --with-harfbuzz
+  - --with-xinput2
+  - --with-modules
+  - --with-sqlite3
+  - --with-gnutls
+  - --with-json
+  - --with-rsvg
+  - --with-webp
+  - --without-pop
+  - --without-m17n-flt
+  - --without-libotf
+  - --without-imagemagick
+
+# Compiler flags appended to the configure call.
+emacs_cflags: "-O2 -pipe"
+
+# Refuse to start when there is less than this many GB free on the
+# filesystem holding Docker's data root (toolchain image plus buildkit
+# helper, about 1.5 GB) or the one holding emacs_work_dir (sources and
+# objects, about 3 GB).  The install tree itself is ~45 MB.
+emacs_min_free_gb_docker: 4
+emacs_min_free_gb_work: 6
+
+# Drop the prefix on the host before copying the fresh build in.
+emacs_clean_install: true
+
+# Point {{ emacs_bin_dir }}/emacs and emacsclient at this build.
+# Versioned links (emacs-30.2, emacsclient-30.2) are always created.
+emacs_set_default: false
+
+# After a verified install: remove the toolchain image, the builder with
+# its cache, the buildkit helper image, and the sources and objects in
+# emacs_work_dir.  Leaves the daemon and the disk as they were found; a
+# re-run then compiles from scratch again.
+emacs_cleanup: true

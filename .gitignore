@@ -1,0 +1,6 @@
+# ansible-galaxy installs these from requirements.yml; not vendored
+/ansible_collections/
+# roles/emacs-build is vendored on purpose — do not ignore
+
+# stray legacy tangle tree; never part of the role
+/.dotfiles/

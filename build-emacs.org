@@ -1,0 +1,473 @@
+** Build in Docker, run natively (2026-09)
+
+The role ~roles/emacs-build~ now does the whole thing without root on the
+host: only a usable ~docker~ CLI is needed. Written and first run on a
+SageMaker HyperPod login node (Ubuntu 22.04, no sudo, ~/usr/bin/docker~
+setgid ~docker~), where it makes the apt packages asked for in
+[[https://gitlab.audeering.com/research/iva/aws/sagemaker-hyperpod-setup/-/work_items/64][#64]]
+unnecessary for the Emacs part.
+
+The trick is that the container is the *same distribution release* as the
+host (~ubuntu:22.04~ on a Jammy host, derived from the ansible facts), so
+glibc matches and the binary runs unchanged outside the container. Emacs
+is configured with the *host* prefix (~$HOME/local/emacs-<version>~), copied
+out to that path, and the few libraries the host lacks
+(~libgccjit.so.0~, ~libtree-sitter.so.0~, ~libgif.so.7~, ...) are
+bundled into ~<prefix>/lib~, which the binary finds through its rpath.
+
+#+begin_src bash
+ansible-playbook emacs-build.yml
+ansible-playbook emacs-build.yml -e emacs_version=31.1
+ansible-playbook emacs-build.yml -e emacs_set_default=true   # take over ~/local/bin/emacs
+#+end_src
+
+Then Doom, keyed by version so the existing install is untouched:
+
+#+begin_src bash
+EMACS=~/local/bin/emacs-30.2 ~/doom-emacs/bin/doom sync
+~/local/bin/emacs-30.2 --with-profile doom -nw
+#+end_src
+
+Disk: the compile happens in a container from a ~1 GB toolchain image,
+with sources and objects bind-mounted from ~emacs_work_dir~ (default under
+~$HOME/local/build~, i.e. on /fsx, not on the 100 GB root disk that holds
+~/var/lib/docker~). The role refuses to start below
+~emacs_min_free_gb_docker~ / ~emacs_min_free_gb_work~ and, by default,
+removes the image, the builder cache, the buildkit helper and the work
+dir afterwards, so ~df -h /~ ends where it started. Provisioning runs it
+once from ~dotfiles/provision/personal-bootstrap.sh~ (cluster profile);
+~make p5-emacs~ forces a rebuild.
+
+Runtime native compilation on the host needs ~as~ and the gcc support
+directory matching the container's libgccjit
+(~/usr/lib/gcc/x86_64-linux-gnu/12~ for Jammy); ~build-essential~ hosts
+have it. The role's ~files/check-emacs.sh~ proves it with a live
+~native-compile~ round-trip. See ~roles/emacs-build/README.md~.
+
+** Build Emacs
+
+./configure --prefix=$PWD/local --bindir=$HOME/bin
+https://superuser.com/questions/637979/install-emacs-without-sudo
+
+./configure --prefix=/my_special_path/usr/local
+https://emacs-ng.github.io/emacs-ng/build/building/
+
+$ ./autogen.sh
+$ ./configure --enable-rust-debug
+$ make -j$(nproc) # proc for number of processors (cores)
+
+https://earthly.dev/blog/autoconf/
+
+Install the gnutls development package. You can find it by doing: apt-cache search 'libgnutls.*-dev', and then install it with apt-get.
+
+
+Sometimes --without-x
+
+./configure --with-native-compilation --with-mailutils --with-tiff=ifavailable --with-gnutls=ifavailable --without-x --without-native-compilation
+
+
+
+** Build Docker Emacs
+
+Die Rothstein-Rolle holt ein tgz und nimmt unarchive
+Ich bin an git interessiert:
+
+ git clone --origin origin https://git.savannah.gnu.org/git/emacs.git /tmp/emacs-build
+git checkout -b native-comp origin/feature/native-comp
+Danach muss man den Dockerfile in das git Verzeichnis kopieren
+und builden
+docker build  -t emacs-build .
+
+docker images
+REPOSITORY    TAG       IMAGE ID       CREATED        SIZE
+emacs-build   latest    c3e11dd0f2f4   7 hours ago    2.26GB
+ubuntu        20.04     ba6acccedd29   2 months ago   72.8MB
+
+
+Allderings liegt das image dann dort:
+
+sudo ls  /var/lib/docker/overlay2/8e5df0638f98afaec168cd1a3ffd8a95006a00d0c3b8a28434e3819026f6dbe2/diff/usr/local/bin -l
+
+ sudo find  /var/lib/docker/ -iname "emacs"
+
+
+docker build .
+
+docker build  . -t "testme"
+docker images | grep testme
+#  geht nicht
+docker run -d --rm testme
+
+docker image history testme
+docker image inspect testme
+Da ist nun meiner: b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95
+Wie finde ich diese ID?
+
+
+Override Entrypont:
+ docker run  --rm -it   --entrypoint=/bin/bash  f0d598995d2d
+
+https://www.emacswiki.org/emacs/BuildingEmacs
+
+**** Meine Artefakte
+
+***** binaries
+
+
+#+begin_src bash :results output raw
+sudo ls /var/lib/docker/overlay2/b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95/diff/usr/local/bin
+#+end_src
+
+#+RESULTS:
+ctags
+ebrowse
+emacs
+emacs-29.0.50
+emacsclient
+etags
+
+
+***** Libraries
+
+#+begin_src bash :results output raw
+sudo ls /var/lib/docker/overlay2/b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95/diff/usr/local/lib/emacs/
+#+end_src
+
+#+RESULTS:
+29.0.50
+/var/lib/docker/overlay2/b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95/diff/usr/local/lib/:
+29.0.50
+
+/var/lib/docker/overlay2/b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95/diff/usr/local/lib/emacs/29.0.50:
+native-lisp
+
+/var/lib/docker/overlay2/b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95/diff/usr/local/lib/emacs/29.0.50/native-lisp:
+29.0.50-29d013dc
+
+/var/lib/docker/overlay2/b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95/diff/usr/local/lib/emacs/29.0.50/native-lisp/29.0.50-29d013dc:
+autoload-f3599901-64619c56.eln
+bytecomp-12882072-3dc6b6ee.eln
+byte-opt-9c5f25f5-f201057c.eln
+cconv-3b1f1f98-22b82361.eln
+charscript-600dca1a-639e1e93.eln
+comp-7672a6ed-46efb6d0.eln
+comp-cstr-ef162ef7-20e6ea66.eln
+emoji-zwj-4f682c68-5a9fd4e7.eln
+preloaded
+titdic-cnv-765ac3be-1d964bef.eln
+
+/var/lib/docker/overlay2/b39ad4baa1f7e1b7b75a3bd72236ffe0320603695916bf23b93add07dab15d95/diff/usr/local/lib/emacs/29.0.50/native-lisp/29.0.50-29d013dc/preloaded:
+abbrev-2af30c9a-61056824.eln
+backquote-d5b20f7c-6dfc6085.eln
+bindings-d30713c5-7a09821b.eln
+buff-menu-da4b0b04-b23a7d82.eln
+burmese-3ddca72e-6aa09761.eln
+button-747c9d6e-87e9f085.eln
+byte-run-79ff048e-ce2815d8.eln
+case-table-3a8e2808-be7656d4.eln
+cham-7498ab67-4831a6b4.eln
+characters-45232aae-89559346.eln
+chinese-c5896779-bb7df124.eln
+cl-generic-be68ad15-a0b9f099.eln
+cl-preloaded-6e6a1f4e-676e310d.eln
+common-win-4b869e38-d60fdb10.eln
+composite-beea1fd5-6001e0e1.eln
+cp51932-89105e97-e8997b76.eln
+cus-face-74f1689e-4f21c5e2.eln
+cus-start-26315480-54c45959.eln
+custom-c166a157-7ce7b4cb.eln
+cyrillic-79ea53dc-54849acf.eln
+czech-c6790aeb-8820d2fd.eln
+disp-table-375616aa-5c285770.eln
+dnd-12d90309-f8c52779.eln
+dos-fns-6e9410f2-9e80dcb2.eln
+dos-vars-f5506e15-bb9b98ed.eln
+dos-w32-923cbfb1-13f651ee.eln
+dynamic-setting-55f80457-29972e5a.eln
+easymenu-1fb41c0e-a3d158eb.eln
+ediff-hook-0b92f1a2-9201f46f.eln
+eldoc-d20a5fe9-9815c569.eln
+electric-a9ca6cdd-42ab4a9c.eln
+elisp-mode-90dbfe40-6250b348.eln
+english-e3896aa2-6665c1ec.eln
+env-72406999-a036d1f6.eln
+epa-hook-99ab3afb-11a7f05a.eln
+ethiopic-b0f5a6d8-80a96866.eln
+eucjp-ms-5daf4e1a-cf27da4c.eln
+european-369de593-3fd092db.eln
+faces-b9447c93-efbec2b6.eln
+files-1e8937b2-8ae7d5e2.eln
+fill-19d89c43-f15bf097.eln
+float-sup-c5369b32-fa14b03f.eln
+font-core-c3bff1fd-c6f4afb7.eln
+font-lock-895216f6-cadfd4ed.eln
+fontset-da863153-684e5d4b.eln
+format-c5b23b0d-c37952e0.eln
+frame-b40fc590-85275492.eln
+fringe-d5d49a60-a141550b.eln
+georgian-8daa6ed6-af8cf423.eln
+greek-ddbf878c-9431fa96.eln
+haiku-win-a742f47b-57697436.eln
+hebrew-b9ed6a0d-8863a58f.eln
+help-59d8049f-2acde1b9.eln
+image-f221b419-069379c1.eln
+indent-396b3792-cb262708.eln
+indian-0c4ce628-55fef365.eln
+internal-957edb14-8e7081e0.eln
+isearch-693bdd75-4627e5d8.eln
+iso-transl-466860a2-55ab7e24.eln
+japanese-d54f685c-3d830a32.eln
+jit-lock-8a988e43-5c83f105.eln
+jka-cmpr-hook-ff630d3e-cf32ebad.eln
+keymap-b4249274-cf5f12f5.eln
+khmer-914ba26a-faa77228.eln
+korean-2f82396a-b6432cd3.eln
+lao-81d6a353-4b9962a5.eln
+lisp-1e88867d-9eeed7b1.eln
+lisp-mode-410874a4-08a2d8df.eln
+ls-lisp-4d1ed918-22b07d80.eln
+macroexp-2c3e1495-b57f7481.eln
+map-ynp-990591b5-0b147924.eln
+menu-bar-4f46ea94-e0100dd6.eln
+minibuffer-1b0f548b-5f17591e.eln
+misc-lang-7cb33d20-69eb6148.eln
+mouse-15f283fa-0e936c53.eln
+mule-3352613d-1619da2f.eln
+mule-cmds-c8553014-16ef26d9.eln
+mule-conf-eca41db8-36618144.eln
+mule-util-5c349a87-e11b64b4.eln
+mwheel-168e9ec3-3d9d3137.eln
+nadvice-64630aaa-e0e84c39.eln
+newcomment-678006bb-5c2db744.eln
+ns-win-ef8075c0-972e8900.eln
+obarray-318a5d56-6312b83b.eln
+page-ee7241cc-572c9d55.eln
+paragraphs-faf2e9b4-22365b43.eln
+paren-0f414553-9a4348be.eln
+pc-win-2c50182f-7d1107cd.eln
+pgtk-win-9e6b24f1-28dbca81.eln
+prog-mode-642b2411-e3bdce44.eln
+regexp-opt-d2355c94-5f9416fe.eln
+register-80045398-ae63ad8d.eln
+replace-fc551dbc-631e306a.eln
+rfn-eshadow-25788e78-8301b6e7.eln
+romanian-36a52030-ffb8441c.eln
+scroll-bar-20650688-3534ff63.eln
+select-784d9bb7-a2a4057c.eln
+shorthands-1dc1e95e-d80e00b1.eln
+simple-fab5b0cf-23b57aaa.eln
+sinhala-ce98fc4b-463487ec.eln
+slovak-ece02e01-3d8c4905.eln
+startup-bbc6ea72-aeb488c2.eln
+subr-13adf6a6-3e8a30b2.eln
+syntax-bf4e4bc4-19987706.eln
+tab-bar-f81d329c-ac833bd0.eln
+tabulated-list-552ba1e5-4c9eb9a4.eln
+tai-viet-fdaa77d1-5aae2b21.eln
+text-mode-7f741068-4c001dd1.eln
+thai-7d4342b5-53a38fc5.eln
+tibetan-b792461b-5a211ff1.eln
+timer-3ee7cfd9-76499eee.eln
+tool-bar-ae0b5bc0-0f398c9c.eln
+tooltip-29462ede-291e687b.eln
+tty-colors-b7804baf-6cde262b.eln
+ucs-normalize-ad11ce47-f161d033.eln
+uniquify-0fb233ac-71af60f9.eln
+utf-8-lang-7d52ad20-10393d1a.eln
+vc-hooks-cfa0878e-f36a6048.eln
+version-025f5cb3-21a72404.eln
+vietnamese-f823b5c7-0e05e16d.eln
+w32-fns-d8ead36c-dc827673.eln
+w32-vars-6533c316-cef60feb.eln
+w32-win-a6781510-d65d8daa.eln
+widget-5b69ebb0-ff2889b8.eln
+window-0d1b8b93-9a7e79b0.eln
+x-dnd-f8192910-c7e94971.eln
+x-win-3c49581f-8984369d.eln
+29.0.50
+emacs
+systemd
+
+
+
+
+
+
+
+emacs-ng hat einen guten Dockerfile:
+
+https://emacs-ng.github.io/emacs-ng/build/docker/
+
+docker run  -d  --rm -it   --entrypoint=/bin/bash  testme
+docker exec -it determined_allen /bin/bash
+
+docker cp determined_allen:/opt/src emacs-build
+
+docker cp determined_allen:/opt/src emacs-build
+
+Nach dem Builden fehlen:
+
+
+docker run -d --rm -it emacs-ng
+
+docker run -d --rm -it emacs-ng:builder18
+
+docker exec -it determined_allen emacs
+
+
+db:
+    image: postgres:10-alpine
+    environment:
+        - POSTGRES_DB=feldm
+        - POSTGRES_USER=christian
+        - POSTGRES_PASSWORD=passwd
+    ports:
+        - 5432:5432
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+
+
+docker run -d -v ~/.emacs.d:/root/.emacs.d -it testme
+
+
+What to add for python
+apt install software-properties-common
+add-apt-repository ppa:deadsnakes/ppa
+apt install python3.7
+apt install python3.8
+
+apt install silversearcher-ag
+ apt install sndfile-tools
+sox
+
+
+Da steht was zu den Berechtigungen UID GID etc.
+https://hub.docker.com/r/jare/emacs
+
+
+**** Lokale installation
+
+#+begin_src bash :results output raw
+sudo ls /usr/local/bin/emacs* -l
+#+end_src
+
+#+RESULTS:
+lrwxrwxrwx 1 root root       10 Okt  9  2020 /usr/local/bin/emacs -> emacs-25.3
+-rwxr-xr-x 1 root root 25716472 Okt  9  2020 /usr/local/bin/emacs-25.3
+-rw-r--r-- 1 root root      460 Jul 21  2021 /usr/local/bin/emacs-capture
+-rwxr-xr-x 1 root root   170984 Okt  9  2020 /usr/local/bin/emacsclient
+
+
+*** Dockerfile
+
+Offene Fragen: Was muss man dann rauskopieren aus dem Container?
+
+#+begin_src dockerfile :tangle ./roles/emacs-build/templates/Dockerfile.j2
+
+FROM ubuntu:20.04
+
+# We assume the git repo's cloned outside and copied in, instead of
+# cloning it in here. But that works, too.
+WORKDIR /opt
+COPY . /opt
+
+LABEL MAINTAINER "Mickey Petersen at mastering emacs"
+
+# Needed for add-apt-repository, et al.
+#
+# If you're installing this outside Docker you may not need this.
+RUN apt-get update \
+        && apt-get install -y \
+        apt-transport-https \
+        ca-certificates \
+        curl \
+        gnupg-agent \
+        software-properties-common
+
+# Needed for gcc-10 and the build process.
+RUN add-apt-repository ppa:ubuntu-toolchain-r/ppa \
+        && apt-get update -y \
+        && apt-get install -y gcc-10 libgccjit0 libgccjit-10-dev
+
+# Needed for fast JSON and the configure step
+RUN apt-get install -y libjansson4 libjansson-dev git
+
+# Shut up debconf as it'll fuss over postfix for no good reason
+# otherwise. If you're doing this outside Docker, you do not need to
+# do this.
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Cheats' way of ensuring we get all the build deps for Emacs without
+# specifying them ourselves. Enable source packages then tell apt to
+# get all the deps for whatever Emacs version Ubuntu supports by
+# default.
+RUN sed -i 's/# deb-src/deb-src/' /etc/apt/sources.list \
+    && apt-get update \
+    && apt-get build-dep -y emacs
+
+# Needed for compiling libgccjit or we'll get cryptic error messages
+# about failing smoke tests.
+ENV CC="gcc-10"
+
+# Configure and run
+RUN ./autogen.sh \
+        && ./configure --with-native-compilation --with-mailutils
+
+ENV JOBS=2
+RUN make -j ${JOBS} && make install
+
+ENTRYPOINT ["emacs"]
+
+#+end_src
+
+
+*** Shell Script to install emacs
+
+Reformulated as shell script
+
+Für Tidal:
+./configure --without-sound --without-x
+
+https://club.tidalcycles.org/t/successful-linux-install-plus-tidal-coding-on-ipad-and-most-likely-an-android-device-with-emacs/736
+
+#+begin_src bash :tangle ~/work/code/emacs/build-script.sh :mkdirp yes
+
+#!/usr/bin/env bash
+
+sudo apt-get update \
+        && apt-get install -y \
+        apt-transport-https \
+        ca-certificates \
+        curl \
+        gnupg-agent \
+        software-properties-common
+
+yes | sudo add-apt-repository ppa:ubuntu-toolchain-r/ppa \
+        && sudo apt-get update -y \
+        && sudo apt-get install -y gcc-10 libgccjit0 libgccjit-10-dev
+
+
+# This doesn't work
+# Shut up debconf as it'll fuss over postfix for no good reason
+# otherwise. If you're doing this outside Docker, you do not need to
+# do this.
+# export DEBIAN_FRONTEND=noninteractive
+
+
+sudo sed -i 's/# deb-src/deb-src/' /etc/apt/sources.list \
+    && sudo apt-get update \
+    && sudo apt-get build-dep -y emacs
+
+export CC="gcc-10"
+
+
+./autogen.sh \
+        && ./configure --with-native-compilation --with-mailutils
+
+export JOBS=10
+
+make -j ${JOBS}
+# sudo make install
+
+#+end_src

@@ -1,0 +1,51 @@
+---
+# Validated when the role runs; a bad invocation fails early with a clear message.
+argument_specs:
+  main:
+    short_description: Build GNU Emacs in Docker and install it natively.
+    description:
+      - Compiles Emacs from source inside a container whose base image matches
+        the host distribution release, then copies the install tree onto the
+        host and bundles the shared libraries the host lacks.
+    options:
+      emacs_version:
+        type: str
+        default: "30.2"
+        description: Emacs release to build (a tag under https://ftp.gnu.org/gnu/emacs/).
+      emacs_base_image:
+        type: str
+        description: >-
+          Docker base image; must match the host glibc.  Defaults to
+          ubuntu:{{ ansible_distribution_version }}.
+      emacs_prefix:
+        type: str
+        description: Install prefix on the host; defaults to ~/local/emacs-<version>.
+      emacs_bin_dir:
+        type: str
+        description: Directory the versioned emacs/emacsclient links go into (~/local/bin).
+      emacs_gcc_version:
+        type: int
+        default: 12
+        description: >-
+          gcc major version to compile with; must match a gcc support directory
+          present on the host for runtime native compilation (12 on Jammy).
+      tree_sitter_version:
+        type: str
+        default: "0.25.10"
+        description: tree-sitter release to build from source (Emacs 30 needs a newer one than distros ship).
+      emacs_set_default:
+        type: bool
+        default: false
+        description: Point ~/local/bin/emacs and emacsclient at this build, not only the versioned links.
+      emacs_cleanup:
+        type: bool
+        default: true
+        description: Remove the toolchain image, builder cache and work dir after a verified install.
+      emacs_min_free_gb_docker:
+        type: int
+        default: 4
+        description: Refuse to build below this many GB free on Docker's data-root filesystem.
+      emacs_min_free_gb_work:
+        type: int
+        default: 6
+        description: Refuse to build below this many GB free on the work-dir filesystem.

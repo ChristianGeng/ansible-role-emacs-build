@@ -1,0 +1,10 @@
+---
+# Local smoke test: run the role against localhost.
+#   cd .. && ansible-playbook ansible-role-emacs-build/tests/test.yml
+# Needs a usable docker CLI; compiles Emacs (~20 min).
+- name: Build Emacs with the role
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  roles:
+    - ansible-role-emacs-build

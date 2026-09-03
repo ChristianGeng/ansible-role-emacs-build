@@ -1,0 +1,245 @@
+---
+# tasks for emacs-build
+#
+# 1. refuse to start if Docker's disk or the work disk is too full
+# 2. build the toolchain image on a dedicated buildx builder
+# 3. compile and install Emacs in a container from that image, with the
+#    work dir and the install prefix bind-mounted from the host, so the
+#    sources and objects live on the host disk and the install lands
+#    directly at the path it was configured for
+# 4. bundle the shared libraries the host lacks into <prefix>/lib
+# 5. verify on the host, link the binaries into emacs_bin_dir
+# 6. remove the image, the builder with its cache, the buildkit helper
+#    image and the work dir
+#
+# Plain `docker` CLI throughout, on purpose: on hosts where /usr/bin/docker
+# is setgid docker and the user is not in the docker group, the Python SDK
+# behind community.docker cannot open the socket, but the CLI can.
+
+- name: Show build parameters
+  tags: debuginfo
+  ansible.builtin.debug:
+    msg:
+      version: "{{ emacs_version }}"
+      base_image: "{{ emacs_base_image }}"
+      prefix: "{{ emacs_prefix }}"
+      work_dir: "{{ emacs_work_dir }}"
+      jobs: "{{ emacs_jobs }}"
+
+# ---- pre-flight -----------------------------------------------------------
+
+- name: Find Docker's data root
+  ansible.builtin.command:
+    argv: [docker, info, --format, "{{ '{{' }}.DockerRootDir{{ '}}' }}"]
+  register: docker_root
+  changed_when: false
+
+- name: Create the work directory
+  ansible.builtin.file:
+    path: "{{ emacs_work_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Free space (GB) on Docker's disk and on the work disk
+  ansible.builtin.shell: |
+    df -BG --output=avail "{{ docker_root.stdout | default('/var/lib', true) }}" 2>/dev/null | tail -1 | tr -dc 0-9 || df -BG --output=avail /var/lib | tail -1 | tr -dc 0-9
+    echo
+    df -BG --output=avail "{{ emacs_work_dir }}" | tail -1 | tr -dc 0-9
+  register: free
+  changed_when: false
+
+- name: Refuse to build without enough disk
+  ansible.builtin.assert:
+    that:
+      - (free.stdout_lines[0] | int) >= (emacs_min_free_gb_docker | int)
+      - (free.stdout_lines[1] | int) >= (emacs_min_free_gb_work | int)
+    fail_msg: >-
+      Not enough disk: {{ free.stdout_lines[0] }}G free on {{ docker_root.stdout }}
+      (need {{ emacs_min_free_gb_docker }}G for the toolchain image),
+      {{ free.stdout_lines[1] }}G free on {{ emacs_work_dir }}
+      (need {{ emacs_min_free_gb_work }}G for sources and objects).
+      Free space, point emacs_work_dir elsewhere, or lower the thresholds.
+    success_msg: >-
+      {{ free.stdout_lines[0] }}G free on {{ docker_root.stdout }},
+      {{ free.stdout_lines[1] }}G free on {{ emacs_work_dir }}
+
+# ---- toolchain image --------------------------------------------------------
+
+- name: Render Dockerfile
+  ansible.builtin.template:
+    src: Dockerfile.j2
+    dest: "{{ emacs_build_dir }}/Dockerfile"
+    mode: "0644"
+
+- name: Ensure the dedicated buildx builder exists
+  ansible.builtin.shell: >
+    docker buildx inspect {{ emacs_builder }} >/dev/null 2>&1
+    && echo exists
+    || docker buildx create --name {{ emacs_builder }} --driver docker-container
+  register: builder
+  changed_when: "'exists' not in builder.stdout"
+
+- name: Build the toolchain image
+  ansible.builtin.command:
+    argv:
+      - docker
+      - buildx
+      - build
+      - --builder
+      - "{{ emacs_builder }}"
+      - --load
+      - --tag
+      - "{{ emacs_image }}"
+      - "{{ emacs_build_dir }}"
+  changed_when: true
+
+# ---- compile + install --------------------------------------------------------
+
+- name: Remove previous install at the prefix
+  ansible.builtin.file:
+    path: "{{ emacs_prefix }}"
+    state: absent
+  when: emacs_clean_install
+
+- name: Ensure the parent of the prefix exists
+  ansible.builtin.file:
+    path: "{{ emacs_prefix | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Stage the in-container build script
+  ansible.builtin.copy:
+    src: build-in-container.sh
+    dest: "{{ emacs_build_dir }}/build-in-container.sh"
+    mode: "0755"
+
+- name: Compile and install Emacs in a container (takes a while)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --user
+      - "{{ ansible_user_uid }}:{{ ansible_user_gid }}"
+      - -v
+      - "{{ emacs_prefix | dirname }}:{{ emacs_prefix | dirname }}"
+      - -v
+      - "{{ emacs_build_dir }}:{{ emacs_build_dir }}"
+      - -e
+      - "HOME={{ emacs_work_dir }}"
+      - -e
+      - "EMACS_VERSION={{ emacs_version }}"
+      - -e
+      - "EMACS_TARBALL_URL={{ emacs_tarball_url }}"
+      - -e
+      - "EMACS_PREFIX={{ emacs_prefix }}"
+      - -e
+      - "EMACS_WORK={{ emacs_work_dir }}"
+      - -e
+      - "EMACS_JOBS={{ emacs_jobs }}"
+      - -e
+      - "EMACS_CONFIGURE_ARGS={{ emacs_configure_args | join(' ') }}"
+      - -e
+      - "EMACS_CFLAGS={{ emacs_cflags }}"
+      - "{{ emacs_image }}"
+      - bash
+      - "{{ emacs_build_dir }}/build-in-container.sh"
+  register: build
+  changed_when: true
+
+- name: Show build summary
+  ansible.builtin.debug:
+    msg: "{{ build.stdout_lines }}"
+
+# ---- host side -----------------------------------------------------------------
+
+- name: Bundle the shared libraries the host cannot resolve
+  ansible.builtin.script:
+    cmd: "bundle-missing-libs.sh {{ emacs_prefix }} {{ emacs_work_dir }}/bundle"
+  register: bundle
+  changed_when: "'bundled: none' not in bundle.stdout"
+
+- name: Show what was bundled
+  ansible.builtin.debug:
+    msg: "{{ bundle.stdout_lines }}"
+
+- name: Verify the build on the host
+  ansible.builtin.script:
+    cmd: "check-emacs.sh {{ emacs_prefix }}"
+  register: check
+  changed_when: false
+
+- name: Show verification result
+  ansible.builtin.debug:
+    msg: "{{ check.stdout_lines }}"
+
+- name: Ensure bin dir exists
+  tags: link
+  ansible.builtin.file:
+    path: "{{ emacs_bin_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Link versioned binaries into the bin dir
+  tags: link
+  ansible.builtin.file:
+    src: "{{ emacs_prefix }}/bin/{{ item }}"
+    dest: "{{ emacs_bin_dir }}/{{ item }}-{{ emacs_version }}"
+    state: link
+    force: true
+  loop:
+    - emacs
+    - emacsclient
+
+- name: Make this build the default emacs
+  tags: link
+  ansible.builtin.file:
+    src: "{{ emacs_prefix }}/bin/{{ item }}"
+    dest: "{{ emacs_bin_dir }}/{{ item }}"
+    state: link
+    force: true
+  loop:
+    - emacs
+    - emacsclient
+  when: emacs_set_default
+
+# ---- cleanup -----------------------------------------------------------------
+
+- name: Remove the toolchain image
+  ansible.builtin.command:
+    argv: [docker, image, rm, "{{ emacs_image }}"]
+  when: emacs_cleanup
+  changed_when: true
+
+- name: Remove the builder and its build cache
+  ansible.builtin.command:
+    argv: [docker, buildx, rm, "{{ emacs_builder }}"]
+  when: emacs_cleanup
+  changed_when: true
+
+# Shared by every docker-container builder on the daemon; fails harmlessly
+# if another builder still uses it.
+- name: Remove the buildkit helper image
+  ansible.builtin.command:
+    argv: [docker, image, rm, "moby/buildkit:buildx-stable-1"]
+  when: emacs_cleanup
+  register: rm_buildkit
+  changed_when: rm_buildkit.rc == 0
+  failed_when: false
+
+- name: Remove sources, objects and the library candidates
+  ansible.builtin.file:
+    path: "{{ emacs_work_dir }}"
+    state: absent
+  when: emacs_cleanup
+
+- name: Disk state after the run
+  ansible.builtin.shell: |
+    df -h "{{ docker_root.stdout | default('/var/lib', true) }}" 2>/dev/null | tail -1 || df -h /var/lib | tail -1
+    df -h "{{ emacs_build_dir }}" | tail -1
+  register: disk_after
+  changed_when: false
+
+- name: Show disk state
+  ansible.builtin.debug:
+    msg: "{{ disk_after.stdout_lines }}"

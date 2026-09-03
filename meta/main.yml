@@ -1,0 +1,29 @@
+---
+galaxy_info:
+  role_name: emacs_build
+  namespace: christiangeng
+  author: Christian Geng
+  description: >-
+    Build GNU Emacs from source inside Docker and install it natively under
+    the user's home, without root and without apt packages on the host.  For
+    frozen distributions (Ubuntu LTS, Debian stable) whose packaged Emacs is
+    too old; rolling releases (Arch, Debian unstable) do not need it.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+    - name: Debian
+      versions:
+        - bookworm
+  galaxy_tags:
+    - emacs
+    - editor
+    - docker
+    - build
+    - nativecomp
+    - workstation
+
+dependencies: []

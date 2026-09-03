@@ -1,0 +1,17 @@
+---
+extends: default
+
+rules:
+  truthy:
+    allowed-values:
+      - 'true'
+      - 'false'
+      - 'yes'
+      - 'no'
+  line-length:
+    level: warning
+    max: 160
+    allow-non-breakable-inline-mappings: true
+  indentation:
+    level: warning
+    indent-sequences: consistent
