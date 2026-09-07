@@ -120,20 +120,34 @@ does not ship is bundled inside `/opt/emacs-<version>/lib`.
 
 ### Download
 
-From a workflow run — needs `gh auth login` and read access to the repo:
+**From a workflow run.**  Works for every full build, needs
+`gh auth login` and read access to the repo.  This is the route that is
+always available:
 
 ```sh
 gh run download --repo ChristianGeng/ansible-role-emacs-build \
     --name emacs-30.2-ubuntu-22.04 --dir .
 ```
 
-From a tagged release, no auth at all:
+Artifacts expire after 90 days.  `--name` picks the newest matching
+artifact from the most recent run that has one; pass a run id as the
+first argument to pin a specific build.
+
+**From a release.**  No auth, no `gh`, and the URL is stable — but it
+only resolves once a `v*` tag has been pushed *and* its `full-build` job
+has finished uploading.  `releases/latest/download/...` returns 404 while
+the repo has no published release, so check
+[the releases page](https://github.com/ChristianGeng/ansible-role-emacs-build/releases)
+first:
 
 ```sh
 base=https://github.com/ChristianGeng/ansible-role-emacs-build/releases/latest/download
 curl -fLO "$base/emacs-30.2-ubuntu-22.04-x86_64.tar.zst"
 curl -fLO "$base/emacs-30.2-ubuntu-22.04-x86_64.tar.zst.sha256"
 ```
+
+`latest` also ignores pre-releases, so a pre-release tag will not make
+that URL resolve.
 
 ### Verify and install
 

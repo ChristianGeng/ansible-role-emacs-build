@@ -194,9 +194,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARBALL: ${{ steps.package.outputs.tarball }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            || echo "release already exists, uploading into it"
+          # Only "already exists" is tolerated.  Masking every failure
+          # here turns a contents:write denial into a confusing upload
+          # error two lines later.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists, uploading into it"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
           gh release upload "${GITHUB_REF_NAME}" \
             "$TARBALL" "$TARBALL.sha256" --clobber
+          gh release view "${GITHUB_REF_NAME}" --json assets \
+            --jq '.assets[] | "uploaded \(.name) \(.size) bytes"'
