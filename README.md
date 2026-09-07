@@ -139,15 +139,24 @@ curl -fLO "$base/emacs-30.2-ubuntu-22.04-x86_64.tar.zst.sha256"
 
 ```sh
 sha256sum -c emacs-30.2-ubuntu-22.04-x86_64.tar.zst.sha256
-sudo tar --zstd -xf emacs-30.2-ubuntu-22.04-x86_64.tar.zst -C /opt
+sudo tar --zstd --no-same-owner -xf emacs-30.2-ubuntu-22.04-x86_64.tar.zst -C /opt
 mkdir -p ~/local/bin
 ln -sfn /opt/emacs-30.2/bin/emacs       ~/local/bin/emacs-30.2
 ln -sfn /opt/emacs-30.2/bin/emacsclient ~/local/bin/emacsclient-30.2
 ```
 
+`--no-same-owner` matters: the archive carries the CI runner's uid, and
+`tar` as root would otherwise restore it, leaving `/opt/emacs-30.2` owned
+by whatever local account happens to hold uid 1001.
+
 `sudo` is needed only to write into `/opt`.  Nothing is registered with
 the package manager, no apt packages are installed, and removing the
 build is `sudo rm -rf /opt/emacs-30.2` plus the two symlinks.
+
+If you cannot write to `/opt` on the target at all, the prebuilt tarball
+is not an option — the prefix is baked in, so there is no unprivileged
+path that works.  Run the role instead; its default prefix is
+`~/local/emacs-<version>` and needs no root.
 
 ### Check it
 
