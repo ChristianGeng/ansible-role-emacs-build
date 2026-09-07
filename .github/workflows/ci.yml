@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install ansible-core ansible-lint yamllint
+      - run: yamllint -c .yamllint.yml .
+      - run: ansible-lint -c .ansible-lint.yml
+      - run: ansible-playbook --syntax-check tests/test.yml
+
+  full-build:
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      EMACS_VERSION: "30.2"
+      EMACS_PREFIX: "$HOME/local/emacs-30.2"
+      ARTIFACT_NAME: "emacs-30.2-ubuntu-22.04"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jlumbroso/free-disk-space@v1.3.1
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip zstd tar
+          python3 -m pip install --upgrade pip
+          pip install ansible-core
+      - run: |
+          ansible-playbook tests/test.yml \
+            -e "emacs_base_image=ubuntu:22.04" \
+            -e "emacs_version=${EMACS_VERSION}"
+      - run: "${EMACS_PREFIX}/bin/emacs" --version
+      - run: |
+          tar --zstd -cf "${ARTIFACT_NAME}.tar.zst" -C "$HOME/local" "emacs-${EMACS_VERSION}"
+          sha256sum "${ARTIFACT_NAME}.tar.zst" > "${ARTIFACT_NAME}.tar.zst.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            ${{ env.ARTIFACT_NAME }}.tar.zst
+            ${{ env.ARTIFACT_NAME }}.tar.zst.sha256
