@@ -51,7 +51,9 @@
 - name: Free space (GB) on Docker's disk and on the work disk
   tags: toolchain
   ansible.builtin.shell: |
-    df -BG --output=avail "{{ docker_root.stdout | default('/var/lib', true) }}" 2>/dev/null | tail -1 | tr -dc 0-9 || df -BG --output=avail /var/lib | tail -1 | tr -dc 0-9
+    df -BG --output=avail "{{ docker_root.stdout | default('/var/lib', true) }}" 2>/dev/null \
+      | tail -1 | tr -dc 0-9 \
+      || df -BG --output=avail /var/lib | tail -1 | tr -dc 0-9
     echo
     df -BG --output=avail "{{ emacs_work_dir }}" | tail -1 | tr -dc 0-9
   register: free
