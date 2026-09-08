@@ -1,8 +1,13 @@
 # ansible-role-emacs-build
 
+[![CI](https://github.com/ChristianGeng/ansible-role-emacs-build/actions/workflows/ci.yml/badge.svg)](https://github.com/ChristianGeng/ansible-role-emacs-build/actions/workflows/ci.yml)
+
 Build GNU Emacs from source inside Docker and leave a **natively
 runnable** install on the host: no root, no apt packages on the host, and
 nothing left behind in the Docker daemon afterwards.
+
+Or skip the compile entirely and install the tarball CI already built:
+[Installing a prebuilt build](#installing-a-prebuilt-build-no-compile).
 
 Galaxy: `christiangeng.emacs_build`.
 
@@ -94,6 +99,109 @@ packages; answer yes, or pass `-!` to skip the prompt.
 EMACS=~/local/bin/emacs-30.2 ~/doom-emacs/bin/doom sync
 ~/local/bin/emacs-30.2 --with-profile doom -nw
 ```
+
+## Installing a prebuilt build (no compile)
+
+Every full CI run uploads the finished install tree, so a box that only
+has to *run* Emacs never has to build it.  The artifact is
+`emacs-<version>-ubuntu-22.04-x86_64.tar.zst` with a `.sha256` beside it.
+
+**The tree is not relocatable.**  Emacs bakes the configure prefix into
+the binary — lisp dir, native-lisp dir, rpath — so it only works at the
+path it was configured for.  CI therefore builds at `/opt/emacs-<version>`
+rather than the role's `~/local` default, precisely because `/opt` exists
+on every box and is the same path everywhere.  Extract it anywhere else
+and Emacs will not find its own lisp directory.
+
+The target needs Ubuntu 22.04 (jammy) on x86_64, so that glibc matches,
+plus `binutils` and `/usr/lib/gcc/x86_64-linux-gnu/12` if you want
+runtime native compilation.  Everything else the binary needs that jammy
+does not ship is bundled inside `/opt/emacs-<version>/lib`.
+
+### Download
+
+**From a workflow run.**  Works for every full build, needs
+`gh auth login` and read access to the repo.  This is the route that is
+always available:
+
+```sh
+gh run download --repo ChristianGeng/ansible-role-emacs-build \
+    --name emacs-30.2-ubuntu-22.04 --dir .
+```
+
+Artifacts expire after 90 days.  `--name` picks the newest matching
+artifact from the most recent run that has one; pass a run id as the
+first argument to pin a specific build.
+
+**From a release.**  No auth, no `gh`, and the URL is stable — but it
+only resolves once a `v*` tag has been pushed *and* its `full-build` job
+has finished uploading.  `releases/latest/download/...` returns 404 while
+the repo has no published release, so check
+[the releases page](https://github.com/ChristianGeng/ansible-role-emacs-build/releases)
+first:
+
+```sh
+base=https://github.com/ChristianGeng/ansible-role-emacs-build/releases/latest/download
+curl -fLO "$base/emacs-30.2-ubuntu-22.04-x86_64.tar.zst"
+curl -fLO "$base/emacs-30.2-ubuntu-22.04-x86_64.tar.zst.sha256"
+```
+
+`latest` also ignores pre-releases, so a pre-release tag will not make
+that URL resolve.
+
+### Verify and install
+
+```sh
+sha256sum -c emacs-30.2-ubuntu-22.04-x86_64.tar.zst.sha256
+sudo tar --zstd --no-same-owner -xf emacs-30.2-ubuntu-22.04-x86_64.tar.zst -C /opt
+mkdir -p ~/local/bin
+ln -sfn /opt/emacs-30.2/bin/emacs       ~/local/bin/emacs-30.2
+ln -sfn /opt/emacs-30.2/bin/emacsclient ~/local/bin/emacsclient-30.2
+```
+
+`--no-same-owner` matters: the archive carries the CI runner's uid, and
+`tar` as root would otherwise restore it, leaving `/opt/emacs-30.2` owned
+by whatever local account happens to hold uid 1001.
+
+`sudo` is needed only to write into `/opt`.  Nothing is registered with
+the package manager, no apt packages are installed, and removing the
+build is `sudo rm -rf /opt/emacs-30.2` plus the two symlinks.
+
+If you cannot write to `/opt` on the target at all, the prebuilt tarball
+is not an option — the prefix is baked in, so there is no unprivileged
+path that works.  Run the role instead; its default prefix is
+`~/local/emacs-<version>` and needs no root.
+
+### Check it
+
+```sh
+~/local/bin/emacs-30.2 --version
+~/local/bin/emacs-30.2 --batch --eval \
+    '(princ (format "native-comp %s treesit %s\n" (native-comp-available-p) (treesit-available-p)))'
+```
+
+## CI
+
+`.github/workflows/ci.yml`, three tiers, because the cost difference is
+enormous:
+
+| tier | when | cost |
+|------|------|------|
+| `lint` — yamllint, ansible-lint, playbook syntax check | every push and PR | seconds |
+| `toolchain` — render the Dockerfile and build the image, stopping before `configure` | every push and PR | a few minutes |
+| `full-build` — compile, verify, package, upload | weekly, on a `v*` tag, on manual dispatch, or on a push whose commit message contains `[full-build]` | an hour or more |
+
+The middle tier is `--tags toolchain,cleanup`, which exercises base image
+resolution and the apt build-dep list — the parts most likely to rot —
+without paying for the compile.  Run it locally the same way:
+
+```sh
+ansible-playbook tests/test.yml --tags toolchain,cleanup
+```
+
+CI covers Ubuntu 22.04 only, and `meta/main.yml` lists exactly that.  The
+role has no jammy-specific logic and noble should work, but nothing
+proves it, so it is not claimed.
 
 ## Idempotence
 

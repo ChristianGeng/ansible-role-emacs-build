@@ -27,28 +27,40 @@
       jobs: "{{ emacs_jobs }}"
 
 # ---- pre-flight -----------------------------------------------------------
+#
+# Pre-flight and the toolchain image carry the `toolchain` tag, so
+# `--tags toolchain` renders the Dockerfile and builds the image but stops
+# before configure/make.  Add `cleanup` to tear the image and the builder
+# down again.  CI uses `--tags toolchain,cleanup` as a cheap per-push check
+# that base image resolution and the apt build-deps still work.
 
 - name: Find Docker's data root
+  tags: toolchain
   ansible.builtin.command:
     argv: [docker, info, --format, "{{ '{{' }}.DockerRootDir{{ '}}' }}"]
   register: docker_root
   changed_when: false
 
 - name: Create the work directory
+  tags: toolchain
   ansible.builtin.file:
     path: "{{ emacs_work_dir }}"
     state: directory
     mode: "0755"
 
 - name: Free space (GB) on Docker's disk and on the work disk
+  tags: toolchain
   ansible.builtin.shell: |
-    df -BG --output=avail "{{ docker_root.stdout | default('/var/lib', true) }}" 2>/dev/null | tail -1 | tr -dc 0-9 || df -BG --output=avail /var/lib | tail -1 | tr -dc 0-9
+    df -BG --output=avail "{{ docker_root.stdout | default('/var/lib', true) }}" 2>/dev/null \
+      | tail -1 | tr -dc 0-9 \
+      || df -BG --output=avail /var/lib | tail -1 | tr -dc 0-9
     echo
     df -BG --output=avail "{{ emacs_work_dir }}" | tail -1 | tr -dc 0-9
   register: free
   changed_when: false
 
 - name: Refuse to build without enough disk
+  tags: toolchain
   ansible.builtin.assert:
     that:
       - (free.stdout_lines[0] | int) >= (emacs_min_free_gb_docker | int)
@@ -66,12 +78,14 @@
 # ---- toolchain image --------------------------------------------------------
 
 - name: Render Dockerfile
+  tags: toolchain
   ansible.builtin.template:
     src: Dockerfile.j2
     dest: "{{ emacs_build_dir }}/Dockerfile"
     mode: "0644"
 
 - name: Ensure the dedicated buildx builder exists
+  tags: toolchain
   ansible.builtin.shell: >
     docker buildx inspect {{ emacs_builder }} >/dev/null 2>&1
     && echo exists
@@ -80,6 +94,7 @@
   changed_when: "'exists' not in builder.stdout"
 
 - name: Build the toolchain image
+  tags: toolchain
   ansible.builtin.command:
     argv:
       - docker
@@ -206,12 +221,14 @@
 # ---- cleanup -----------------------------------------------------------------
 
 - name: Remove the toolchain image
+  tags: cleanup
   ansible.builtin.command:
     argv: [docker, image, rm, "{{ emacs_image }}"]
   when: emacs_cleanup
   changed_when: true
 
 - name: Remove the builder and its build cache
+  tags: cleanup
   ansible.builtin.command:
     argv: [docker, buildx, rm, "{{ emacs_builder }}"]
   when: emacs_cleanup
@@ -220,6 +237,7 @@
 # Shared by every docker-container builder on the daemon; fails harmlessly
 # if another builder still uses it.
 - name: Remove the buildkit helper image
+  tags: cleanup
   ansible.builtin.command:
     argv: [docker, image, rm, "moby/buildkit:buildx-stable-1"]
   when: emacs_cleanup
@@ -228,12 +246,14 @@
   failed_when: false
 
 - name: Remove sources, objects and the library candidates
+  tags: cleanup
   ansible.builtin.file:
     path: "{{ emacs_work_dir }}"
     state: absent
   when: emacs_cleanup
 
 - name: Disk state after the run
+  tags: cleanup
   ansible.builtin.shell: |
     df -h "{{ docker_root.stdout | default('/var/lib', true) }}" 2>/dev/null | tail -1 || df -h /var/lib | tail -1
     df -h "{{ emacs_build_dir }}" | tail -1
@@ -241,5 +261,6 @@
   changed_when: false
 
 - name: Show disk state
+  tags: cleanup
   ansible.builtin.debug:
     msg: "{{ disk_after.stdout_lines }}"

@@ -1,0 +1,210 @@
+---
+name: CI
+
+# Three tiers, because the cost difference is enormous (see issue #1):
+#   lint       every push and PR, seconds, no Docker
+#   toolchain  every push and PR, a few minutes: build the container image
+#              from templates/Dockerfile.j2 and stop before configure/make
+#   full-build compile Emacs for real and upload the install tree.  Weekly,
+#              on a v* tag, on manual dispatch, or on a push whose commit
+#              message contains [full-build].  Never on an ordinary push.
+"on":
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  schedule:
+    # Sundays 04:00 UTC.  Scheduled runs only ever fire on the default branch.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      emacs_version:
+        description: "Emacs version to build"
+        required: false
+        default: "30.2"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and syntax check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible-core ansible-lint yamllint
+
+      - name: yamllint
+        run: yamllint -c .yamllint.yml .
+
+      - name: ansible-lint
+        run: ansible-lint -c .ansible-lint.yml
+
+      # ansible.cfg sets roles_path=.., and the checkout directory is named
+      # after the repository, so the role resolves as ansible-role-emacs-build.
+      - name: Playbook syntax check
+        run: ansible-playbook --syntax-check tests/test.yml
+
+  toolchain:
+    name: Toolchain image (Ubuntu 22.04)
+    needs: lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ansible-core
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible-core
+
+      # Renders the Dockerfile, builds the image on its own buildx builder,
+      # then tears both down again.  Exercises base image resolution and the
+      # apt build-dep list without paying for the compile.
+      - name: Render Dockerfile and build the toolchain image
+        run: |
+          ansible-playbook tests/test.yml \
+            --tags toolchain,cleanup \
+            -e "emacs_base_image=ubuntu:22.04"
+
+  full-build:
+    name: Full Emacs build (Ubuntu 22.04)
+    needs: lint
+    if: >-
+      github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/')
+      || contains(github.event.head_commit.message, '[full-build]')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    permissions:
+      # Only used by the release step, which is guarded to v* tags.
+      contents: write
+    env:
+      EMACS_VERSION: ${{ inputs.emacs_version || '30.2' }}
+      # NOT the role default of ~/local/emacs-<ver>.  Emacs bakes the
+      # configure --prefix into the binary (lisp dir, native-lisp dir,
+      # rpath), so an install tree only works at the absolute path it was
+      # configured for.  A tree built at /home/runner/... is useless to
+      # anyone else, so CI builds at a neutral path that exists on every
+      # box and the artifact is installable as-is.
+      EMACS_PREFIX: /opt/emacs-${{ inputs.emacs_version || '30.2' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The role refuses to start below 4 GB free on Docker's disk and 6 GB
+      # on the work disk; both are / on a hosted runner.  These trees are the
+      # cheapest ~25 GB on the image and none of them are used here.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # zstd for the artifact; gcc-12 and binutils because check-emacs.sh
+      # does a native-compile round trip on the *host*, which needs the gcc
+      # support directory matching emacs_gcc_version.  Both are normally
+      # already on the runner image; installing them is cheap insurance.
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd gcc-12 binutils
+          python -m pip install --upgrade pip
+          pip install ansible-core
+
+      # make install runs in the container as the runner's uid, and the
+      # role removes and re-creates the prefix, so the runner needs write
+      # permission on /opt itself.  Not recursive: /opt/hostedtoolcache and
+      # everything else under it keep their ownership.
+      - name: Make /opt writable for the build user
+        run: |
+          sudo chown "$(id -un):$(id -gn)" /opt
+          ls -ld /opt
+
+      - name: Build Emacs ${{ env.EMACS_VERSION }}
+        run: |
+          ansible-playbook tests/test.yml \
+            -e "emacs_base_image=ubuntu:22.04" \
+            -e "emacs_version=${EMACS_VERSION}" \
+            -e "emacs_prefix=${EMACS_PREFIX}"
+
+      # The role already verified the build; this asserts the same thing
+      # through the versioned symlink a consumer would actually use.
+      - name: Smoke-test the installed binary
+        run: |
+          "${EMACS_PREFIX}/bin/emacs" --version
+          "$HOME/local/bin/emacs-${EMACS_VERSION}" --version
+
+      - name: Package the install tree
+        id: package
+        run: |
+          tarball="emacs-${EMACS_VERSION}-ubuntu-22.04-x86_64.tar.zst"
+          tar --zstd -cf "$tarball" -C /opt "emacs-${EMACS_VERSION}"
+          sha256sum "$tarball" > "$tarball.sha256"
+          ls -lh "$tarball"
+          cat "$tarball.sha256"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emacs-${{ env.EMACS_VERSION }}-ubuntu-22.04
+          path: |
+            ${{ steps.package.outputs.tarball }}
+            ${{ steps.package.outputs.tarball }}.sha256
+          if-no-files-found: error
+          retention-days: 90
+          # The tarball is already zstd; zipping it again buys nothing.
+          compression-level: 0
+
+      # The role deletes the work dir on success, so these only exist when
+      # the compile failed - which is exactly when they are worth having.
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ env.EMACS_VERSION }}
+          path: |
+            ~/local/build/emacs-build-${{ env.EMACS_VERSION }}/work/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # A tag build gets a permanent download URL, so a control node can
+      # install without ever building.
+      - name: Attach the tarball to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ steps.package.outputs.tarball }}
+        run: |
+          # Only "already exists" is tolerated.  Masking every failure
+          # here turns a contents:write denial into a confusing upload
+          # error two lines later.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists, uploading into it"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+          gh release upload "${GITHUB_REF_NAME}" \
+            "$TARBALL" "$TARBALL.sha256" --clobber
+          gh release view "${GITHUB_REF_NAME}" --json assets \
+            --jq '.assets[] | "uploaded \(.name) \(.size) bytes"'

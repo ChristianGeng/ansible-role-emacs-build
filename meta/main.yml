@@ -10,14 +10,15 @@ galaxy_info:
     too old; rolling releases (Arch, Debian unstable) do not need it.
   license: MIT
   min_ansible_version: "2.15"
+  # Only what CI actually exercises, otherwise this is an untested claim.
+  # The role derives emacs_base_image from host facts and has no
+  # Ubuntu-specific logic, so noble and Debian bookworm are expected to
+  # work - but nothing proves it. Add them back here as soon as the CI
+  # matrix in .github/workflows/ci.yml covers them.
   platforms:
     - name: Ubuntu
       versions:
         - jammy
-        - noble
-    - name: Debian
-      versions:
-        - bookworm
   galaxy_tags:
     - emacs
     - editor
