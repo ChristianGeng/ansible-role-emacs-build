@@ -5,9 +5,12 @@ name: CI
 #   lint       every push and PR, seconds, no Docker
 #   toolchain  every push and PR, a few minutes: build the container image
 #              from templates/Dockerfile.j2 and stop before configure/make
-#   full-build compile Emacs for real and upload the install tree.  Weekly,
-#              on a v* tag, on manual dispatch, or on a push whose commit
-#              message contains [full-build].  Never on an ordinary push.
+#   full-build compile Emacs for real and upload the install tree, once per
+#              version in the matrix, in parallel.  Weekly, on a v* tag, on
+#              manual dispatch, or on a push whose commit message contains
+#              [full-build].  Never on an ordinary push.
+#   release    on a v* tag only: collect every version's tarball and attach
+#              them to the release in one place (see issue #3).
 "on":
   push:
     branches: ["**"]
@@ -18,10 +21,10 @@ name: CI
     - cron: "0 4 * * 0"
   workflow_dispatch:
     inputs:
-      emacs_version:
-        description: "Emacs version to build"
+      emacs_versions:
+        description: 'Versions to build, JSON array (e.g. ["31.1"]). Blank builds them all.'
         required: false
-        default: "30.2"
+        default: ""
 
 permissions:
   contents: read
@@ -80,7 +83,7 @@ jobs:
             -e "emacs_base_image=ubuntu:22.04"
 
   full-build:
-    name: Full Emacs build (Ubuntu 22.04)
+    name: Emacs ${{ matrix.emacs_version }} (Ubuntu 22.04)
     needs: lint
     if: >-
       github.event_name == 'schedule'
@@ -89,18 +92,23 @@ jobs:
       || contains(github.event.head_commit.message, '[full-build]')
     runs-on: ubuntu-22.04
     timeout-minutes: 300
-    permissions:
-      # Only used by the release step, which is guarded to v* tags.
-      contents: write
+    strategy:
+      # A regression in one version must not cancel the other.  30.2 is
+      # what is actually deployed; 31.1 is the one under test.
+      fail-fast: false
+      matrix:
+        # The only place the built versions are listed.  A dispatch can
+        # narrow it to one; every other trigger builds them all.
+        emacs_version: ${{ fromJSON(inputs.emacs_versions || '["30.2", "31.1"]') }}
     env:
-      EMACS_VERSION: ${{ inputs.emacs_version || '30.2' }}
+      EMACS_VERSION: ${{ matrix.emacs_version }}
       # NOT the role default of ~/local/emacs-<ver>.  Emacs bakes the
       # configure --prefix into the binary (lisp dir, native-lisp dir,
       # rpath), so an install tree only works at the absolute path it was
       # configured for.  A tree built at /home/runner/... is useless to
       # anyone else, so CI builds at a neutral path that exists on every
       # box and the artifact is installable as-is.
-      EMACS_PREFIX: /opt/emacs-${{ inputs.emacs_version || '30.2' }}
+      EMACS_PREFIX: /opt/emacs-${{ matrix.emacs_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -186,17 +194,45 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # A tag build gets a permanent download URL, so a control node can
-      # install without ever building.
-      - name: Attach the tarball to the release
-        if: startsWith(github.ref, 'refs/tags/')
+  # A tag build gets a permanent download URL, so a control node can
+  # install without ever building.
+  #
+  # Deliberately one job rather than a step inside the matrix: two matrix
+  # jobs both running `gh release create` for the same tag race each other
+  # - both look, both find nothing, both create, one loses.  Collecting the
+  # artifacts and uploading once removes the race and lets full-build keep
+  # a read-only token.
+  release:
+    name: Attach tarballs to the release
+    needs: full-build
+    # !cancelled() rather than success(): with fail-fast disabled, one
+    # version failing still leaves the other's tarball worth publishing.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Collect every version's tarball
+        uses: actions/download-artifact@v4
+        with:
+          pattern: emacs-*-ubuntu-22.04
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TARBALL: ${{ steps.package.outputs.tarball }}
         run: |
-          # Only "already exists" is tolerated.  Masking every failure
-          # here turns a contents:write denial into a confusing upload
-          # error two lines later.
+          shopt -s nullglob
+          files=(dist/*.tar.zst dist/*.tar.zst.sha256)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no tarballs were built, nothing to publish" >&2
+            exit 1
+          fi
+          ls -lh "${files[@]}"
+          # Only "already exists" is tolerated.  Masking every failure here
+          # turns a contents:write denial into a confusing upload error two
+          # lines later.
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             echo "release ${GITHUB_REF_NAME} already exists, uploading into it"
           else
@@ -204,7 +240,6 @@ jobs:
               --title "${GITHUB_REF_NAME}" \
               --generate-notes
           fi
-          gh release upload "${GITHUB_REF_NAME}" \
-            "$TARBALL" "$TARBALL.sha256" --clobber
+          gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
           gh release view "${GITHUB_REF_NAME}" --json assets \
             --jq '.assets[] | "uploaded \(.name) \(.size) bytes"'

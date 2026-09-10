@@ -106,6 +106,10 @@ Every full CI run uploads the finished install tree, so a box that only
 has to *run* Emacs never has to build it.  The artifact is
 `emacs-<version>-ubuntu-22.04-x86_64.tar.zst` with a `.sha256` beside it.
 
+CI builds **one tarball per Emacs version** in the matrix (currently 30.2
+and 31.1), so pick the version you want and substitute it into the
+filenames below.  A release carries all of them side by side.
+
 **The tree is not relocatable.**  Emacs bakes the configure prefix into
 the binary — lisp dir, native-lisp dir, rpath — so it only works at the
 path it was configured for.  CI therefore builds at `/opt/emacs-<version>`
@@ -126,12 +130,14 @@ always available:
 
 ```sh
 gh run download --repo ChristianGeng/ansible-role-emacs-build \
-    --name emacs-30.2-ubuntu-22.04 --dir .
+    --name emacs-31.1-ubuntu-22.04 --dir .
 ```
 
-Artifacts expire after 90 days.  `--name` picks the newest matching
-artifact from the most recent run that has one; pass a run id as the
-first argument to pin a specific build.
+There is one artifact per version — `emacs-30.2-ubuntu-22.04`,
+`emacs-31.1-ubuntu-22.04` — so swap the `--name`, or drop it to fetch
+every version from that run at once.  Artifacts expire after 90 days.
+`--name` picks the newest matching artifact from the most recent run that
+has one; pass a run id as the first argument to pin a specific build.
 
 **From a release.**  No auth, no `gh`, and the URL is stable — but it
 only resolves once a `v*` tag has been pushed *and* its `full-build` job
@@ -182,22 +188,40 @@ path that works.  Run the role instead; its default prefix is
 
 ## CI
 
-`.github/workflows/ci.yml`, three tiers, because the cost difference is
+`.github/workflows/ci.yml`, tiered because the cost difference is
 enormous:
 
-| tier | when | cost |
+| job | when | cost |
 |------|------|------|
 | `lint` — yamllint, ansible-lint, playbook syntax check | every push and PR | seconds |
 | `toolchain` — render the Dockerfile and build the image, stopping before `configure` | every push and PR | a few minutes |
-| `full-build` — compile, verify, package, upload | weekly, on a `v*` tag, on manual dispatch, or on a push whose commit message contains `[full-build]` | an hour or more |
+| `full-build` — compile, verify, package, upload, once per version | weekly, on a `v*` tag, on manual dispatch, or on a push whose commit message contains `[full-build]` | ~15 min per version, in parallel |
+| `release` — collect every version's tarball and attach it | on a `v*` tag | seconds |
 
-The middle tier is `--tags toolchain,cleanup`, which exercises base image
-resolution and the apt build-dep list — the parts most likely to rot —
-without paying for the compile.  Run it locally the same way:
+The `toolchain` tier is `--tags toolchain,cleanup`, which exercises base
+image resolution and the apt build-dep list — the parts most likely to rot
+— without paying for the compile.  Run it locally the same way:
 
 ```sh
 ansible-playbook tests/test.yml --tags toolchain,cleanup
 ```
+
+`full-build` is a matrix over Emacs versions, currently 30.2 and 31.1,
+running in parallel with `fail-fast: false` so a regression in one version
+cannot cancel the other.  The list lives only in the `matrix` block; a
+manual dispatch can narrow it:
+
+```sh
+gh workflow run CI -f emacs_versions='["31.1"]'
+```
+
+Note that `emacs_version` in `defaults/main.yml` is a *separate* decision
+from what CI builds — it is the version consumers get, and moving it has
+to be paired with the guard in `dotfiles/provision/personal-bootstrap.sh`,
+which looks for `~/local/bin/emacs-<version>` without fetching the role.
+
+`release` is its own job rather than a step in the matrix on purpose: two
+matrix jobs both creating the release for one tag race each other.
 
 CI covers Ubuntu 22.04 only, and `meta/main.yml` lists exactly that.  The
 role has no jammy-specific logic and noble should work, but nothing
