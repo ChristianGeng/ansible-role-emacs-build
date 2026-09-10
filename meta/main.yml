@@ -11,14 +11,16 @@ galaxy_info:
   license: MIT
   min_ansible_version: "2.15"
   # Only what CI actually exercises, otherwise this is an untested claim.
-  # The role derives emacs_base_image from host facts and has no
-  # Ubuntu-specific logic, so noble and Debian bookworm are expected to
-  # work - but nothing proves it. Add them back here as soon as the CI
-  # matrix in .github/workflows/ci.yml covers them.
+  # The matrix in .github/workflows/ci.yml builds and verifies Emacs on
+  # each of these. Debian bookworm is expected to work too - the role has
+  # no Ubuntu-specific logic - but nothing exercises it, so it is not
+  # claimed here.
   platforms:
     - name: Ubuntu
       versions:
         - jammy
+        - noble
+        - resolute
   galaxy_tags:
     - emacs
     - editor
