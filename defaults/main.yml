@@ -54,9 +54,6 @@ emacs_configure_args:
   - --with-modules
   - --with-sqlite3
   - --with-gnutls
-  # No --with-json: JSON became native in Emacs 30 and the option was
-  # dropped, so both 30.x and 31.x configure reject it as unrecognized.
-  # Autoconf only warns rather than failing, so it went unnoticed.
   - --with-rsvg
   - --with-webp
   - --without-pop
