@@ -271,6 +271,13 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job never checks the repository out - it only downloads
+          # artifacts - so gh has no git remote to infer the repository
+          # from and every `gh release` call dies with "failed to run git:
+          # not a git repository" before it reaches the API.  GH_REPO
+          # replaces the inference; adding a checkout just to give gh a
+          # remote would be a wasted clone.
+          GH_REPO: ${{ github.repository }}
         run: |
           shopt -s nullglob
           files=(dist/*.tar.zst dist/*.tar.zst.sha256)
