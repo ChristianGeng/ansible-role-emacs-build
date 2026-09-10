@@ -104,11 +104,17 @@ EMACS=~/local/bin/emacs-30.2 ~/doom-emacs/bin/doom sync
 
 Every full CI run uploads the finished install tree, so a box that only
 has to *run* Emacs never has to build it.  The artifact is
-`emacs-<version>-ubuntu-22.04-x86_64.tar.zst` with a `.sha256` beside it.
+`emacs-<emacs>-ubuntu-<release>-x86_64.tar.zst` with a `.sha256` beside
+it.
 
-CI builds **one tarball per Emacs version** in the matrix (currently 30.2
-and 31.1), so pick the version you want and substitute it into the
-filenames below.  A release carries all of them side by side.
+CI builds **one tarball per Emacs version per Ubuntu LTS** — a matrix of
+30.2 and 31.1 against 22.04, 24.04 and 26.04 — so substitute both numbers
+into the filenames below.  A release carries every cell side by side.
+
+**Match the tarball to your distribution.**  The binary links against the
+glibc of the release it was built on, so a 24.04 tarball will not run on
+22.04.  Take the one whose `ubuntu-<release>` is your own; newer than your
+own will not work, older generally will but is not tested.
 
 **The tree is not relocatable.**  Emacs bakes the configure prefix into
 the binary — lisp dir, native-lisp dir, rpath — so it only works at the
@@ -117,10 +123,13 @@ rather than the role's `~/local` default, precisely because `/opt` exists
 on every box and is the same path everywhere.  Extract it anywhere else
 and Emacs will not find its own lisp directory.
 
-The target needs Ubuntu 22.04 (jammy) on x86_64, so that glibc matches,
-plus `binutils` and `/usr/lib/gcc/x86_64-linux-gnu/12` if you want
-runtime native compilation.  Everything else the binary needs that jammy
-does not ship is bundled inside `/opt/emacs-<version>/lib`.
+The target needs x86_64 and, for runtime native compilation, `binutils`
+plus the gcc support directory that matches the release the tarball was
+built on — `/usr/lib/gcc/x86_64-linux-gnu/12` on 22.04,
+`/usr/lib/gcc/x86_64-linux-gnu/14` on 24.04 and 26.04, because that is
+where each release's `libgccjit0` comes from.  Everything else the binary
+needs that the distribution does not ship is bundled inside
+`/opt/emacs-<version>/lib`.
 
 ### Download
 
@@ -133,9 +142,9 @@ gh run download --repo ChristianGeng/ansible-role-emacs-build \
     --name emacs-31.1-ubuntu-22.04 --dir .
 ```
 
-There is one artifact per version — `emacs-30.2-ubuntu-22.04`,
-`emacs-31.1-ubuntu-22.04` — so swap the `--name`, or drop it to fetch
-every version from that run at once.  Artifacts expire after 90 days.
+There is one artifact per cell — `emacs-30.2-ubuntu-22.04`,
+`emacs-31.1-ubuntu-24.04` and so on — so swap the `--name`, or drop it to
+fetch every cell from that run at once.  Artifacts expire after 90 days.
 `--name` picks the newest matching artifact from the most recent run that
 has one; pass a run id as the first argument to pin a specific build.
 
@@ -147,9 +156,13 @@ the repo has no published release, so check
 first:
 
 ```sh
+emacs=31.1
+release=$(. /etc/os-release && echo "$VERSION_ID")   # 22.04, 24.04, 26.04
+tarball=emacs-$emacs-ubuntu-$release-x86_64.tar.zst
+
 base=https://github.com/ChristianGeng/ansible-role-emacs-build/releases/latest/download
-curl -fLO "$base/emacs-30.2-ubuntu-22.04-x86_64.tar.zst"
-curl -fLO "$base/emacs-30.2-ubuntu-22.04-x86_64.tar.zst.sha256"
+curl -fLO "$base/$tarball"
+curl -fLO "$base/$tarball.sha256"
 ```
 
 `latest` also ignores pre-releases, so a pre-release tag will not make
@@ -157,21 +170,25 @@ that URL resolve.
 
 ### Verify and install
 
+Continuing with the `$emacs` and `$tarball` set above:
+
 ```sh
-sha256sum -c emacs-30.2-ubuntu-22.04-x86_64.tar.zst.sha256
-sudo tar --zstd --no-same-owner -xf emacs-30.2-ubuntu-22.04-x86_64.tar.zst -C /opt
+sha256sum -c "$tarball.sha256"
+sudo tar --zstd --no-same-owner -xf "$tarball" -C /opt
 mkdir -p ~/local/bin
-ln -sfn /opt/emacs-30.2/bin/emacs       ~/local/bin/emacs-30.2
-ln -sfn /opt/emacs-30.2/bin/emacsclient ~/local/bin/emacsclient-30.2
+ln -sfn "/opt/emacs-$emacs/bin/emacs"       ~/local/bin/emacs-$emacs
+ln -sfn "/opt/emacs-$emacs/bin/emacsclient" ~/local/bin/emacsclient-$emacs
 ```
 
 `--no-same-owner` matters: the archive carries the CI runner's uid, and
-`tar` as root would otherwise restore it, leaving `/opt/emacs-30.2` owned
-by whatever local account happens to hold uid 1001.
+`tar` as root would otherwise restore it, leaving `/opt/emacs-<version>`
+owned by whatever local account happens to hold uid 1001.
 
 `sudo` is needed only to write into `/opt`.  Nothing is registered with
 the package manager, no apt packages are installed, and removing the
-build is `sudo rm -rf /opt/emacs-30.2` plus the two symlinks.
+build is `sudo rm -rf /opt/emacs-<version>` plus the two symlinks.
+Different Emacs versions install side by side, since the prefix carries
+the version.
 
 If you cannot write to `/opt` on the target at all, the prebuilt tarball
 is not an option — the prefix is baked in, so there is no unprivileged
@@ -181,8 +198,8 @@ path that works.  Run the role instead; its default prefix is
 ### Check it
 
 ```sh
-~/local/bin/emacs-30.2 --version
-~/local/bin/emacs-30.2 --batch --eval \
+~/local/bin/emacs-$emacs --version
+~/local/bin/emacs-$emacs --batch --eval \
     '(princ (format "native-comp %s treesit %s\n" (native-comp-available-p) (treesit-available-p)))'
 ```
 
@@ -194,9 +211,9 @@ enormous:
 | job | when | cost |
 |------|------|------|
 | `lint` — yamllint, ansible-lint, playbook syntax check | every push and PR | seconds |
-| `toolchain` — render the Dockerfile and build the image, stopping before `configure` | every push and PR | a few minutes |
-| `full-build` — compile, verify, package, upload, once per version | weekly, on a `v*` tag, on manual dispatch, or on a push whose commit message contains `[full-build]` | ~15 min per version, in parallel |
-| `release` — collect every version's tarball and attach it | on a `v*` tag | seconds |
+| `toolchain` — render the Dockerfile and build the image, stopping before `configure`, per distribution | every push and PR | a few minutes, in parallel |
+| `full-build` — compile, verify, package, upload, once per cell | weekly, on a `v*` tag, on manual dispatch, or on a push whose commit message contains `[full-build]` | ~20 min per cell, in parallel |
+| `release` — collect every cell's tarball and attach it | on a `v*` tag | seconds |
 
 The `toolchain` tier is `--tags toolchain,cleanup`, which exercises base
 image resolution and the apt build-dep list — the parts most likely to rot
@@ -206,14 +223,28 @@ image resolution and the apt build-dep list — the parts most likely to rot
 ansible-playbook tests/test.yml --tags toolchain,cleanup
 ```
 
-`full-build` is a matrix over Emacs versions, currently 30.2 and 31.1,
-running in parallel with `fail-fast: false` so a regression in one version
-cannot cancel the other.  The list lives only in the `matrix` block; a
-manual dispatch can narrow it:
+`full-build` is a matrix of Emacs version against Ubuntu LTS release:
+30.2 and 31.1 against 22.04, 24.04 and 26.04, six cells in parallel with
+`fail-fast: false` so a regression in one cell cannot cancel the rest.
+Both lists live only in the `matrix` block; a manual dispatch can narrow
+either axis:
 
 ```sh
-gh workflow run CI -f emacs_versions='["31.1"]'
+gh workflow run CI -f emacs_versions='["31.1"]' -f ubuntu_versions='["24.04"]'
 ```
+
+Two constraints the matrix has to respect, both easy to get wrong:
+
+- **The runner is always the same release as the base image.**  The role
+  compiles inside the container but resolves libraries and runs the
+  native-compile probe on the *host*, so a binary built against noble's
+  glibc cannot be verified on a jammy runner.  `runs-on` is derived from
+  the same matrix value as `emacs_base_image`.
+- **`emacs_gcc_version` follows the distribution.**  `libgccjit0` is built
+  from gcc-12 on jammy but gcc-14 on noble and resolute.  Mismatch it and
+  the image builds fine, then `check-emacs.sh` fails on the host at the
+  native-compile probe.  `matrix.include` keys the gcc version on the
+  release so the two cannot drift apart.
 
 Note that `emacs_version` in `defaults/main.yml` is a *separate* decision
 from what CI builds — it is the version consumers get, and moving it has
@@ -223,9 +254,9 @@ which looks for `~/local/bin/emacs-<version>` without fetching the role.
 `release` is its own job rather than a step in the matrix on purpose: two
 matrix jobs both creating the release for one tag race each other.
 
-CI covers Ubuntu 22.04 only, and `meta/main.yml` lists exactly that.  The
-role has no jammy-specific logic and noble should work, but nothing
-proves it, so it is not claimed.
+`meta/main.yml` lists exactly the releases CI proves and nothing more.
+Debian is still absent for that reason: the role has no Ubuntu-specific
+logic and bookworm ought to work, but nothing exercises it.
 
 ## Idempotence
 
