@@ -3,14 +3,20 @@ name: CI
 
 # Three tiers, because the cost difference is enormous (see issue #1):
 #   lint       every push and PR, seconds, no Docker
-#   toolchain  every push and PR, a few minutes: build the container image
-#              from templates/Dockerfile.j2 and stop before configure/make
+#   toolchain  every push and PR, a few minutes per distribution: build the
+#              container image from templates/Dockerfile.j2 and stop before
+#              configure/make
 #   full-build compile Emacs for real and upload the install tree, once per
-#              version in the matrix, in parallel.  Weekly, on a v* tag, on
-#              manual dispatch, or on a push whose commit message contains
-#              [full-build].  Never on an ordinary push.
-#   release    on a v* tag only: collect every version's tarball and attach
+#              distribution x version cell, in parallel.  Weekly, on a v*
+#              tag, on manual dispatch, or on a push whose commit message
+#              contains [full-build].  Never on an ordinary push.
+#   release    on a v* tag only: collect every cell's tarball and attach
 #              them to the release in one place (see issue #3).
+#
+# The runner and the container base image are always the same Ubuntu
+# release (see issue #5).  The role compiles in the container but resolves
+# libraries and runs the native-compile probe on the *host*, so a binary
+# built against noble's glibc cannot be verified on a jammy runner.
 "on":
   push:
     branches: ["**"]
@@ -22,7 +28,11 @@ name: CI
   workflow_dispatch:
     inputs:
       emacs_versions:
-        description: 'Versions to build, JSON array (e.g. ["31.1"]). Blank builds them all.'
+        description: 'Emacs versions, JSON array (e.g. ["31.1"]). Blank builds them all.'
+        required: false
+        default: ""
+      ubuntu_versions:
+        description: 'Ubuntu LTS releases, JSON array (e.g. ["24.04"]). Blank builds them all.'
         required: false
         default: ""
 
@@ -57,10 +67,27 @@ jobs:
         run: ansible-playbook --syntax-check tests/test.yml
 
   toolchain:
-    name: Toolchain image (Ubuntu 22.04)
+    name: Toolchain image (Ubuntu ${{ matrix.ubuntu }})
     needs: lint
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-${{ matrix.ubuntu }}
     timeout-minutes: 30
+    strategy:
+      # A new release breaking the apt build-dep list must not hide whether
+      # the others still work.
+      fail-fast: false
+      matrix:
+        ubuntu: ["22.04", "24.04", "26.04"]
+        include:
+          # Whichever gcc built this release's libgccjit0.  It has to travel
+          # with the release: install the wrong libgccjit-N-dev and the image
+          # builds fine, then check-emacs.sh fails on the host at the
+          # native-compile probe because /usr/lib/gcc/.../N does not match.
+          - ubuntu: "22.04"
+            gcc: 12
+          - ubuntu: "24.04"
+            gcc: 14
+          - ubuntu: "26.04"
+            gcc: 14
     steps:
       - uses: actions/checkout@v4
 
@@ -75,33 +102,48 @@ jobs:
 
       # Renders the Dockerfile, builds the image on its own buildx builder,
       # then tears both down again.  Exercises base image resolution and the
-      # apt build-dep list without paying for the compile.
+      # apt build-dep list without paying for the compile - which is exactly
+      # what a new Ubuntu release breaks first.
       - name: Render Dockerfile and build the toolchain image
         run: |
           ansible-playbook tests/test.yml \
             --tags toolchain,cleanup \
-            -e "emacs_base_image=ubuntu:22.04"
+            -e "emacs_base_image=ubuntu:${{ matrix.ubuntu }}" \
+            -e "emacs_gcc_version=${{ matrix.gcc }}"
 
   full-build:
-    name: Emacs ${{ matrix.emacs_version }} (Ubuntu 22.04)
+    name: Emacs ${{ matrix.emacs_version }} on Ubuntu ${{ matrix.ubuntu }}
     needs: lint
     if: >-
       github.event_name == 'schedule'
       || github.event_name == 'workflow_dispatch'
       || startsWith(github.ref, 'refs/tags/')
       || contains(github.event.head_commit.message, '[full-build]')
-    runs-on: ubuntu-22.04
+    # Same release as the base image, never mixed: the compile happens in
+    # the container but bundle-missing-libs.sh and check-emacs.sh run here.
+    runs-on: ubuntu-${{ matrix.ubuntu }}
     timeout-minutes: 300
     strategy:
-      # A regression in one version must not cancel the other.  30.2 is
-      # what is actually deployed; 31.1 is the one under test.
+      # A regression in one cell must not cancel the rest.  jammy + 30.2 is
+      # what is actually deployed; everything else is under test.
       fail-fast: false
       matrix:
-        # The only place the built versions are listed.  A dispatch can
-        # narrow it to one; every other trigger builds them all.
+        # The only place the built combinations are listed.  A dispatch can
+        # narrow either axis; every other trigger builds the lot.
+        ubuntu: ${{ fromJSON(inputs.ubuntu_versions || '["22.04", "24.04", "26.04"]') }}
         emacs_version: ${{ fromJSON(inputs.emacs_versions || '["30.2", "31.1"]') }}
+        include:
+          # Whichever gcc built this release's libgccjit0.  Keyed on ubuntu
+          # so it is added to every cell of that release and cannot drift.
+          - ubuntu: "22.04"
+            gcc: 12
+          - ubuntu: "24.04"
+            gcc: 14
+          - ubuntu: "26.04"
+            gcc: 14
     env:
       EMACS_VERSION: ${{ matrix.emacs_version }}
+      UBUNTU_VERSION: ${{ matrix.ubuntu }}
       # NOT the role default of ~/local/emacs-<ver>.  Emacs bakes the
       # configure --prefix into the binary (lisp dir, native-lisp dir,
       # rpath), so an install tree only works at the absolute path it was
@@ -126,14 +168,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      # zstd for the artifact; gcc-12 and binutils because check-emacs.sh
-      # does a native-compile round trip on the *host*, which needs the gcc
-      # support directory matching emacs_gcc_version.  Both are normally
-      # already on the runner image; installing them is cheap insurance.
+      # zstd for the artifact; gcc-N and binutils because check-emacs.sh does
+      # a native-compile round trip on the *host*, which needs the gcc
+      # support directory matching emacs_gcc_version.  N is the matrix's, so
+      # the host directory and the container's libgccjit-N-dev agree.
       - name: Install build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends zstd gcc-12 binutils
+          sudo apt-get install -y --no-install-recommends \
+            zstd "gcc-${{ matrix.gcc }}" binutils
+          ls -d "/usr/lib/gcc/x86_64-linux-gnu/${{ matrix.gcc }}"
           python -m pip install --upgrade pip
           pip install ansible-core
 
@@ -146,12 +190,13 @@ jobs:
           sudo chown "$(id -un):$(id -gn)" /opt
           ls -ld /opt
 
-      - name: Build Emacs ${{ env.EMACS_VERSION }}
+      - name: Build Emacs ${{ env.EMACS_VERSION }} on Ubuntu ${{ env.UBUNTU_VERSION }}
         run: |
           ansible-playbook tests/test.yml \
-            -e "emacs_base_image=ubuntu:22.04" \
+            -e "emacs_base_image=ubuntu:${UBUNTU_VERSION}" \
             -e "emacs_version=${EMACS_VERSION}" \
-            -e "emacs_prefix=${EMACS_PREFIX}"
+            -e "emacs_prefix=${EMACS_PREFIX}" \
+            -e "emacs_gcc_version=${{ matrix.gcc }}"
 
       # The role already verified the build; this asserts the same thing
       # through the versioned symlink a consumer would actually use.
@@ -163,7 +208,7 @@ jobs:
       - name: Package the install tree
         id: package
         run: |
-          tarball="emacs-${EMACS_VERSION}-ubuntu-22.04-x86_64.tar.zst"
+          tarball="emacs-${EMACS_VERSION}-ubuntu-${UBUNTU_VERSION}-x86_64.tar.zst"
           tar --zstd -cf "$tarball" -C /opt "emacs-${EMACS_VERSION}"
           sha256sum "$tarball" > "$tarball.sha256"
           ls -lh "$tarball"
@@ -173,7 +218,7 @@ jobs:
       - name: Upload the artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emacs-${{ env.EMACS_VERSION }}-ubuntu-22.04
+          name: emacs-${{ env.EMACS_VERSION }}-ubuntu-${{ env.UBUNTU_VERSION }}
           path: |
             ${{ steps.package.outputs.tarball }}
             ${{ steps.package.outputs.tarball }}.sha256
@@ -188,7 +233,9 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs-${{ env.EMACS_VERSION }}
+          # Per cell, not per version: two cells failing would otherwise
+          # collide on the artifact name.
+          name: build-logs-${{ env.EMACS_VERSION }}-ubuntu-${{ env.UBUNTU_VERSION }}
           path: |
             ~/local/build/emacs-build-${{ env.EMACS_VERSION }}/work/*.log
           if-no-files-found: warn
@@ -205,17 +252,19 @@ jobs:
   release:
     name: Attach tarballs to the release
     needs: full-build
-    # !cancelled() rather than success(): with fail-fast disabled, one
-    # version failing still leaves the other's tarball worth publishing.
+    # !cancelled() rather than success(): with fail-fast disabled, one cell
+    # failing still leaves the others' tarballs worth publishing.
     if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - name: Collect every version's tarball
+      - name: Collect every cell's tarball
         uses: actions/download-artifact@v4
         with:
-          pattern: emacs-*-ubuntu-22.04
+          # Every distribution, not just jammy.  build-logs-* artifacts are
+          # deliberately not matched.
+          pattern: emacs-*-ubuntu-*
           path: dist
           merge-multiple: true
 
