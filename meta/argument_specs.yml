@@ -25,10 +25,12 @@ argument_specs:
         description: Directory the versioned emacs/emacsclient links go into (~/local/bin).
       emacs_gcc_version:
         type: int
-        default: 12
         description: >-
-          gcc major version to compile with; must match a gcc support directory
-          present on the host for runtime native compilation (12 on Jammy).
+          gcc major version to compile with.  Must be the one that built the
+          host distribution's libgccjit0, and the matching
+          /usr/lib/gcc/x86_64-linux-gnu/<N> must be present on the host for
+          runtime native compilation.  Derived from the distribution by
+          default: 12 below Ubuntu 24.04, 14 from 24.04 onwards.
       tree_sitter_version:
         type: str
         default: "0.25.10"
