@@ -22,6 +22,7 @@
     msg:
       version: "{{ emacs_version }}"
       base_image: "{{ emacs_base_image }}"
+      gcc: "{{ emacs_gcc_version }}"
       prefix: "{{ emacs_prefix }}"
       work_dir: "{{ emacs_work_dir }}"
       jobs: "{{ emacs_jobs }}"

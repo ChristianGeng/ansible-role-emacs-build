@@ -61,9 +61,12 @@ container.
   `/usr/bin/docker` is setgid `docker` and the user is not in the group,
   only the CLI can open the socket.
 - For runtime native compilation on the host: `binutils` and the gcc
-  support directory matching `emacs_gcc_version`
-  (`/usr/lib/gcc/x86_64-linux-gnu/12` on Jammy).  Ubuntu images with
-  `build-essential` have these.
+  support directory matching `emacs_gcc_version` — that is
+  `/usr/lib/gcc/x86_64-linux-gnu/12` on 22.04 and
+  `/usr/lib/gcc/x86_64-linux-gnu/14` on 24.04 and 26.04, since that is
+  where each release's `libgccjit0` comes from.  The role derives the
+  number from the distribution, so you do not have to pass it.  Ubuntu
+  images with `build-essential` have these.
 - Only `ansible.builtin` modules; `ansible-core` is enough.
 
 ## Variables
@@ -77,6 +80,7 @@ See `defaults/main.yml`.  The ones you will touch:
 | `emacs_bin_dir`          | `~/local/bin`                               |
 | `emacs_work_dir`         | `~/local/build/emacs-build-<ver>/work`      |
 | `emacs_base_image`       | `ubuntu:{{ ansible_distribution_version }}` |
+| `emacs_gcc_version`      | `12` below 24.04, `14` from 24.04 — derived |
 | `emacs_configure_args`   | gtk3, cairo, tree-sitter, sqlite, aot native comp |
 | `emacs_set_default`      | `false`                                     |
 | `emacs_cleanup`          | `true`                                      |
@@ -243,8 +247,12 @@ Two constraints the matrix has to respect, both easy to get wrong:
 - **`emacs_gcc_version` follows the distribution.**  `libgccjit0` is built
   from gcc-12 on jammy but gcc-14 on noble and resolute.  Mismatch it and
   the image builds fine, then `check-emacs.sh` fails on the host at the
-  native-compile probe.  `matrix.include` keys the gcc version on the
-  release so the two cannot drift apart.
+  native-compile probe.  The *role* derives it from the facts, and CI
+  deliberately does not override it — otherwise the matrix would only
+  prove the workflow's own mapping and not the default every consumer
+  gets.  The `gcc` value in `matrix.include` exists solely to install the
+  host-side compiler, and a disagreement between the two surfaces as a
+  failed native-compile probe.
 
 Note that `emacs_version` in `defaults/main.yml` is a *separate* decision
 from what CI builds — it is the version consumers get, and moving it has

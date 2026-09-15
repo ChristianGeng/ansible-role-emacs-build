@@ -36,10 +36,21 @@ emacs_image: "emacs-build-toolchain:{{ emacs_version }}"
 
 emacs_jobs: "{{ ansible_processor_vcpus }}"
 
-# Jammy's libgccjit0 is built from gcc-12, so compile with gcc-12 too.
-# The host must have the matching /usr/lib/gcc/x86_64-linux-gnu/<N>
+# Compile with whichever gcc built this release's libgccjit0, and no
+# other: the host must have the matching /usr/lib/gcc/x86_64-linux-gnu/<N>
 # directory (crt*.o, libgcc.a, collect2) for runtime native compilation.
-emacs_gcc_version: 12
+#
+#   jammy 22.04   gcc-12
+#   noble 24.04   gcc-14
+#   resolute 26.04 gcc-14
+#
+# Derived from the facts for the same reason emacs_base_image is: a host
+# newer than jammy would otherwise silently get jammy's compiler, build an
+# Emacs against it, and only fail at the very end when check-emacs.sh
+# cannot find gcc-12 on a box that ships gcc-14.  Anything older than
+# 24.04 (including Debian bookworm, whose libgccjit0 is also gcc-12) keeps
+# 12.  Override for a distribution that maps differently.
+emacs_gcc_version: "{{ 14 if ansible_distribution_version is version('24.04', '>=') else 12 }}"
 
 # Emacs 30 wants a newer tree-sitter than Jammy ships (0.20), so build it.
 tree_sitter_version: "0.25.10"
