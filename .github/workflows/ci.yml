@@ -77,17 +77,6 @@ jobs:
       fail-fast: false
       matrix:
         ubuntu: ["22.04", "24.04", "26.04"]
-        include:
-          # Whichever gcc built this release's libgccjit0.  It has to travel
-          # with the release: install the wrong libgccjit-N-dev and the image
-          # builds fine, then check-emacs.sh fails on the host at the
-          # native-compile probe because /usr/lib/gcc/.../N does not match.
-          - ubuntu: "22.04"
-            gcc: 12
-          - ubuntu: "24.04"
-            gcc: 14
-          - ubuntu: "26.04"
-            gcc: 14
     steps:
       - uses: actions/checkout@v4
 
@@ -104,12 +93,15 @@ jobs:
       # then tears both down again.  Exercises base image resolution and the
       # apt build-dep list without paying for the compile - which is exactly
       # what a new Ubuntu release breaks first.
+      #
+      # emacs_gcc_version is deliberately NOT passed: the role derives it
+      # from the host facts, and overriding it here would test the
+      # workflow's mapping instead of the one real consumers get (#8).
       - name: Render Dockerfile and build the toolchain image
         run: |
           ansible-playbook tests/test.yml \
             --tags toolchain,cleanup \
-            -e "emacs_base_image=ubuntu:${{ matrix.ubuntu }}" \
-            -e "emacs_gcc_version=${{ matrix.gcc }}"
+            -e "emacs_base_image=ubuntu:${{ matrix.ubuntu }}"
 
   full-build:
     name: Emacs ${{ matrix.emacs_version }} on Ubuntu ${{ matrix.ubuntu }}
@@ -133,8 +125,12 @@ jobs:
         ubuntu: ${{ fromJSON(inputs.ubuntu_versions || '["22.04", "24.04", "26.04"]') }}
         emacs_version: ${{ fromJSON(inputs.emacs_versions || '["30.2", "31.1"]') }}
         include:
-          # Whichever gcc built this release's libgccjit0.  Keyed on ubuntu
-          # so it is added to every cell of that release and cannot drift.
+          # Only for the HOST-side gcc install below, which is environment
+          # setup a consumer does too (see the README's Requirements).  The
+          # role derives its own emacs_gcc_version from the facts and is
+          # not told this value; if the two ever disagree, the
+          # native-compile probe in check-emacs.sh fails, which is exactly
+          # the signal we want (#8).
           - ubuntu: "22.04"
             gcc: 12
           - ubuntu: "24.04"
@@ -190,13 +186,15 @@ jobs:
           sudo chown "$(id -un):$(id -gn)" /opt
           ls -ld /opt
 
+      # emacs_gcc_version is deliberately NOT passed: the role derives it
+      # from the host facts, and this is the only place that proves the
+      # derivation is right on each release (#8).
       - name: Build Emacs ${{ env.EMACS_VERSION }} on Ubuntu ${{ env.UBUNTU_VERSION }}
         run: |
           ansible-playbook tests/test.yml \
             -e "emacs_base_image=ubuntu:${UBUNTU_VERSION}" \
             -e "emacs_version=${EMACS_VERSION}" \
-            -e "emacs_prefix=${EMACS_PREFIX}" \
-            -e "emacs_gcc_version=${{ matrix.gcc }}"
+            -e "emacs_prefix=${EMACS_PREFIX}"
 
       # The role already verified the build; this asserts the same thing
       # through the versioned symlink a consumer would actually use.
